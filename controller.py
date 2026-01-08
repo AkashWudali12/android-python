@@ -6,24 +6,25 @@ import time
 import subprocess
 import threading
 import xml.etree.ElementTree as ET
+from ui_state import UINode
 
 UI_STATE_FILE = "/data/local/tmp/t.xml"
-ADB_PATH = "/Users/akashwudali/Library/Android/sdk/platform-tools/adb"
 
+# TODO: Implement __setup method so each instance of an Android Client controls a specific emulator
 
 class AndroidClient:
-    def __init__(self):
+    def __init__(self, __adb_path="/Users/akashwudali/Library/Android/sdk/platform-tools/adb", __emulator_id=""):
         self.__video_socket : Optional[socket.socket] = None
         self.__control_socket : Optional[socket.socket] = None
         self.ready = False
-        self.__running = False
-        self.current_root = None
+
+        self.__ADB_PATH = __adb_path
     
     def __setup_environment(self) -> None:
         pass
 
-    def __get_ui_root(self) -> Optional[ET.Element]:
-        cmd = f"{ADB_PATH} shell 'uiautomator dump {UI_STATE_FILE} > /dev/null && cat {UI_STATE_FILE}'"
+    def get_ui_root(self) -> Optional[ET.Element]:
+        cmd = f"{self.__ADB_PATH} shell 'uiautomator dump {UI_STATE_FILE} > /dev/null && cat {UI_STATE_FILE}'"
         raw_xml = subprocess.check_output(cmd, shell=True, text=True)
 
         if raw_xml.startswith("<?xml"):
@@ -31,23 +32,21 @@ class AndroidClient:
         
         print("Could not get current ui hierarchy")
         return None
-
-    def __update_ui_state(self):
-        updates = 0
-        while self.__running:
-            self.current_root = self.__get_ui_root()
-            updates += 1
-
-            if updates % 10 == 0:
-                print(f"Took {updates} snapshots of ui")
-                if self.current_root is None:
-                    print("No root found")
-                else:
-                    print(f"Root has tag {self.current_root.tag}")
-        
-        print("Stopped collecting ui state")
     
-    def create(self) -> bool:
+    def destroy(self) -> None:
+        try:
+            if self.__video_socket:
+                self.__video_socket.close()
+            if self.__control_socket:
+                self.__control_socket.close()
+            self.ready = False
+
+            cmd = [self.__ADB_PATH, "shell", "rm", UI_STATE_FILE]
+            subprocess.run(cmd)
+        except Exception as e:
+            print(f"The following error occured when destroying client:\n{e}")
+
+    def __connect_socket(self) -> None:
         try:
             # 1. Establish Video Connection (First)
             self.__video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -74,9 +73,6 @@ class AndroidClient:
             else:
                 print("⚠️ Header incomplete or delayed")
             
-            self.__running = True
-            threading.Thread(target=self.__update_ui_state(), daemon=True)
-
             self.ready = True
 
         except KeyboardInterrupt:
@@ -88,25 +84,11 @@ class AndroidClient:
                 print("Successfully created Android client")
             else:
                 print("Failed to create Android client")
-            return self.ready
-
-    def destroy(self) -> None:
-        try:
-            if self.__video_socket:
-                self.__video_socket.close()
-            if self.__control_socket:
-                self.__control_socket.close()
-            self.ready = False
-            self.__running = False
-
-            cmd = [ADB_PATH, "shell", "rm", UI_STATE_FILE]
-            subprocess.run(cmd)
-        except Exception as e:
-            print(f"The following error occured when destroying client:\n{e}")
 
     def monitor_screen_cv2(self) -> None:
-        if self.__video_socket is not None:
-            try:
+        try:
+            self.__connect_socket()
+            if self.ready:
                 print("Created Socket File")
                 socket_file = self.__video_socket.makefile('rb', buffering=0)
 
@@ -120,7 +102,50 @@ class AndroidClient:
 
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
-            except KeyboardInterrupt:
-                print("\n👋 Stopping client...")
+            else:
+                print("Could not connect to video socket")
+        except KeyboardInterrupt:
+            print("\n👋 Stopping client...")
+        except Exception as e:
+            print(f"\n❗ Error: {e}")
+    
+    def click(self, node: UINode) -> bool:
+        if node.clickable:
+            try:
+                x, y = node.center
+                cmd = [self.__ADB_PATH, "shell", "input", "tap", str(x), str(y)]
+                subprocess.run(cmd, check=True)
             except Exception as e:
-                print(f"\n❗ Error: {e}")
+                print(f"Error occured clicking on {node.center}:\n{e}")
+        else:
+            print(f"Element at {node.center} not a clickable element")
+            return False
+    
+    def scroll(self, x1, x2, y1, y2, speed=500) -> bool:
+        try:
+            cmd = [
+                self.__ADB_PATH, 
+                "shell", 
+                "input", 
+                "swipe", 
+                str(x1), str(y1), 
+                str(x2), str(y2), 
+                str(speed)
+            ]
+            subprocess.run(cmd)
+        except Exception as e:
+            print(f"Error occured scrolling at {x1} {y1} {x2} {y2} with speed {speed}:\n{e}")
+    
+    def open(self, app_pkg):
+        try:
+            cmd = [
+                self.__ADB_PATH, 
+                "shell", 
+                "monkey", 
+                "-p", app_pkg, 
+                "-c", "android.intent.category.LAUNCHER", 
+                "1"
+            ]
+            subprocess.run(cmd)
+        except Exception as e:
+            print(f"Error opening {app_pkg}:\n{e}")
